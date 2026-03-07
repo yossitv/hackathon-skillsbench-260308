@@ -6,6 +6,7 @@ Personalize Skill Factory — Main Pipeline
 
 Usage:
     uv run personalize-skill-factory/scripts/factory.py <skill-query> <task-id>
+    uv run personalize-skill-factory/scripts/factory.py <skill-query> <task-id> --auto
 
 Flow:
     staging → developing → generated
@@ -16,6 +17,11 @@ Flow:
     4. Customize + benchmark loop in developing/
     5. Finalize → move to generated/, link to .claude/skills/
     6. Optionally publish to Sundial
+
+Auto mode (--auto):
+    Runs the full pipeline without user interaction.
+    Rejects if safety check returns "dangerous".
+    Runs benchmark once, customize once, benchmark again, then finalize.
 """
 
 import argparse
@@ -73,7 +79,7 @@ def check_safety(staging_path: Path) -> dict:
 
 # ── Step 3: Approve → Move to developing/ ──────────────────────────────
 
-def approve_to_developing(staging_path: Path, safety_report: dict) -> Path:
+def approve_to_developing(staging_path: Path, safety_report: dict, auto: bool = False) -> Path:
     """Show safety report, ask user to approve, move to developing/."""
     skill_md = (staging_path / "SKILL.md").read_text()
 
@@ -93,12 +99,19 @@ def approve_to_developing(staging_path: Path, safety_report: dict) -> Path:
     if len(skill_md) > 500:
         print("    ...")
 
-    choice = input("\n  [a]pprove to developing / [r]eject? ").strip().lower()
-
-    if choice == "r":
-        print("  Rejected. Cleaning up staging.")
-        shutil.rmtree(staging_path)
-        sys.exit(0)
+    if auto:
+        recommendation = safety_report.get("recommendation", "review")
+        if recommendation == "dangerous":
+            print("  Auto-rejected: safety check returned 'dangerous'.")
+            shutil.rmtree(staging_path)
+            sys.exit(1)
+        print(f"  Auto-approved (recommendation: {recommendation})")
+    else:
+        choice = input("\n  [a]pprove to developing / [r]eject? ").strip().lower()
+        if choice == "r":
+            print("  Rejected. Cleaning up staging.")
+            shutil.rmtree(staging_path)
+            sys.exit(0)
 
     # Move staging → developing
     DEVELOPING_DIR.mkdir(parents=True, exist_ok=True)
@@ -138,7 +151,6 @@ def develop_loop(dev_path: Path, task_id: str):
             new_md = customize_with_claude(dev_path, task_id)
             (dev_path / "SKILL.md").write_text(new_md)
             print("  SKILL.md updated.")
-            # Show diff size
             print(f"  New SKILL.md: {len(new_md)} chars")
 
         elif choice == "e":
@@ -148,6 +160,41 @@ def develop_loop(dev_path: Path, task_id: str):
 
         else:
             print("  Invalid choice.")
+
+
+def auto_develop_loop(dev_path: Path, task_id: str, iterations: int = 1):
+    """Auto mode: benchmark → customize → benchmark, N iterations."""
+    from benchmark import benchmark_task, save_benchmark_result, show_benchmark_history
+
+    for i in range(iterations):
+        print(f"\n  ── Auto Iteration {i + 1}/{iterations} ──")
+
+        # Benchmark before
+        print(f"  Benchmarking (before)...")
+        before = benchmark_task(task_id, skill_path=dev_path)
+        save_benchmark_result(dev_path, task_id, before, label=f"auto-{i+1}-before")
+        print(f"  Score: {before.get('score', 'N/A')}")
+
+        # Customize
+        print(f"  Customizing with Claude API...")
+        new_md = customize_with_claude(dev_path, task_id)
+        (dev_path / "SKILL.md").write_text(new_md)
+        print(f"  SKILL.md updated ({len(new_md)} chars)")
+
+        # Benchmark after
+        print(f"  Benchmarking (after)...")
+        after = benchmark_task(task_id, skill_path=dev_path)
+        save_benchmark_result(dev_path, task_id, after, label=f"auto-{i+1}-after")
+        print(f"  Score: {after.get('score', 'N/A')}")
+
+        # Report
+        b = before.get("score") or 0
+        a = after.get("score") or 0
+        print(f"\n  {'─' * 40}")
+        print(f"  Iteration {i + 1}: {b} → {a} (delta: {a - b:+.1f})")
+        print(f"  {'─' * 40}")
+
+    show_benchmark_history(dev_path)
 
 
 def customize_with_claude(dev_path: Path, task_id: str = "") -> str:
@@ -234,9 +281,13 @@ def link_skills():
 
 # ── Step 6: Publish ────────────────────────────────────────────────────
 
-def publish_skill(skill_path: Path):
+def publish_skill(skill_path: Path, auto: bool = False):
     """Optionally publish to Sundial."""
     from publish import publish_to_sundial
+
+    if auto:
+        print("  Auto mode: skipping publish.")
+        return
 
     choice = input("\n  Publish to Sundial? [y/N] ").strip().lower()
     if choice == "y":
@@ -253,10 +304,16 @@ def main():
                         help="Use existing skill in staging/ instead of fetching")
     parser.add_argument("--resume", action="store_true",
                         help="Resume developing an existing skill in developing/")
+    parser.add_argument("--auto", action="store_true",
+                        help="Run full pipeline without user interaction")
+    parser.add_argument("--auto-iterations", type=int, default=1,
+                        help="Number of benchmark→customize→benchmark cycles in auto mode (default: 1)")
     args = parser.parse_args()
 
     print("=" * 60)
     print("  Personalize Skill Factory")
+    if args.auto:
+        print(f"  Mode: AUTO ({args.auto_iterations} iteration(s))")
     print("=" * 60)
 
     if args.resume:
@@ -284,11 +341,14 @@ def main():
 
         # Step 3: Approve → developing
         print(f"\n[3/6] Review & approve")
-        dev_path = approve_to_developing(staging_path, safety_report)
+        dev_path = approve_to_developing(staging_path, safety_report, auto=args.auto)
 
     # Step 4: Develop loop
     print(f"\n[4/6] Develop: customize + benchmark")
-    develop_loop(dev_path, args.task_id)
+    if args.auto:
+        auto_develop_loop(dev_path, args.task_id, iterations=args.auto_iterations)
+    else:
+        develop_loop(dev_path, args.task_id)
 
     # Step 5: Finalize
     print(f"\n[5/6] Finalizing...")
@@ -297,7 +357,7 @@ def main():
 
     # Step 6: Publish
     print(f"\n[6/6] Publish")
-    publish_skill(generated_path)
+    publish_skill(generated_path, auto=args.auto)
 
     print(f"\nDone. Skill saved at: {generated_path}")
 
