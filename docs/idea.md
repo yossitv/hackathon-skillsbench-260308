@@ -124,3 +124,20 @@ GEPA
 Reinforcement Learning
 In-Context Learning
 Improve models or prompts iteratively using methods like Recursive Language Models, GEPA on the in-context learning layer, or RL on the model layer. We select 50 tasks from SkillsBench for evaluation. Your method will be tested on the original SkillsBench and applied to other benchmarks like Terminal-Bench.
+
+
+
+05
+スキルの作成フロー
+欲しいスキルを定義し、検索キーワードを作り、sundialから取得する
+取得したskillは、事前に安全性の確認　
+作り替えるか、ユーザーに確認する
+そのままのskill or カスタマイズしたskill をskillsbenchで実行してスコアを獲得
+元々のスコアと、改善後のスコアを比較して、ユーザーに共有
+出来上がったら、 generated-skills に保存
+sundialに公開するかどうか、ユーザーに確認
+
+
+
+
+(skillsのscripts は daytonaで実行して安全性を獲得)
