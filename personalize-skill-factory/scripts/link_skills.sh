@@ -1,19 +1,31 @@
 #!/usr/bin/env bash
-# Link all generated skills to .claude/skills/ so Claude Code can discover them.
-# Run from project root: bash personalize-skill-factory/scripts/link_skills.sh
+# Link all generated skills to the parent project's .claude/skills/.
+# Called by factory.py after finalizing a skill.
+#
+# Layout:
+#   root/                          ← parent project
+#   ├── .claude/skills/            ← symlinks go here
+#   └── <repo>/                    ← this repo (cloned)
+#       └── personalize-skill-factory/
+#           ├── scripts/link_skills.sh  ← this file
+#           └── skills/generated/
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-GENERATED_DIR="$REPO_ROOT/personalize-skill-factory/skills/generated"
-CLAUDE_SKILLS="$REPO_ROOT/.claude/skills"
+SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+FACTORY_DIR="$(dirname "$SCRIPTS_DIR")"
+REPO_DIR="$(dirname "$FACTORY_DIR")"
+REPO_NAME="$(basename "$REPO_DIR")"
+PARENT_DIR="$(dirname "$REPO_DIR")"
+GENERATED_DIR="$FACTORY_DIR/skills/generated"
+CLAUDE_SKILLS="$PARENT_DIR/.claude/skills"
 
 mkdir -p "$CLAUDE_SKILLS"
 
-# Always link the factory itself
+# Link the factory itself
 factory_link="$CLAUDE_SKILLS/personalize-skill-factory"
 if [ ! -L "$factory_link" ]; then
-  ln -s ../../personalize-skill-factory "$factory_link"
+  ln -s "../../$REPO_NAME/personalize-skill-factory" "$factory_link"
   echo "Linked: personalize-skill-factory"
 fi
 
@@ -26,7 +38,7 @@ for skill_dir in "$GENERATED_DIR"/*/; do
   if [ -L "$link" ]; then
     echo "Skip (exists): $name"
   else
-    ln -s "../../personalize-skill-factory/skills/generated/$name" "$link"
+    ln -s "../../$REPO_NAME/personalize-skill-factory/skills/generated/$name" "$link"
     echo "Linked: $name"
   fi
 done
