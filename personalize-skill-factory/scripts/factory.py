@@ -1,31 +1,38 @@
 # /// script
-# dependencies = ["anthropic"]
+# dependencies = ["anthropic", "daytona-sdk"]
 # ///
 """
 Personalize Skill Factory — Main Pipeline
 
 Usage:
-    uv run factory.py <skill-query> <task-id> [--skip-sundial] [--skip-benchmark]
+    uv run personalize-skill-factory/scripts/factory.py <skill-query> <task-id>
 
 Flow:
-    1. Search & fetch skill from Sundial → quarantine to staging/
-    2. Safety check via Daytona sandbox
-    3. User approval → customize with Claude API if needed
-    4. Benchmark (before: no skill, after: with skill) via harbor
-    5. Save to generated/ and link to .claude/skills/
+    staging → developing → generated
+
+    1. Fetch from Sundial → quarantine to staging/
+    2. Safety check (Claude static + Daytona dynamic)
+    3. Approve → move to developing/
+    4. Customize + benchmark loop in developing/
+    5. Finalize → move to generated/, link to .claude/skills/
     6. Optionally publish to Sundial
 """
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+# Ensure sibling scripts are importable
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 FACTORY_ROOT = REPO_ROOT / "personalize-skill-factory"
 SKILLSBENCH_DIR = FACTORY_ROOT / "skillsbench"
 STAGING_DIR = FACTORY_ROOT / "skills" / "staging"
+DEVELOPING_DIR = FACTORY_ROOT / "skills" / "developing"
 GENERATED_DIR = FACTORY_ROOT / "skills" / "generated"
 SCRIPTS_DIR = FACTORY_ROOT / "scripts"
 
@@ -56,86 +63,142 @@ def check_safety(staging_path: Path) -> dict:
 
     report = run_safety_check(staging_path)
     print(f"\n  Safety Report:")
+    print(f"    Recommendation:     {report.get('recommendation', '?')}")
     print(f"    Dangerous patterns: {len(report.get('dangerous_patterns', []))}")
-    print(f"    Network attempts:   {len(report.get('network_attempts', []))}")
-    print(f"    Files modified:     {len(report.get('files_changed', []))}")
+    print(f"    Network URLs:       {len(report.get('network_urls', []))}")
+    if report.get("dynamic_skipped"):
+        print(f"    Dynamic analysis:   skipped ({report.get('dynamic_reason', '')})")
     return report
 
 
-# ── Step 3: User Approval + Customization ───────────────────────────────
+# ── Step 3: Approve → Move to developing/ ──────────────────────────────
 
-def approve_and_customize(staging_path: Path, safety_report: dict) -> Path:
-    """Ask user to approve, optionally customize with Claude API."""
+def approve_to_developing(staging_path: Path, safety_report: dict) -> Path:
+    """Show safety report, ask user to approve, move to developing/."""
     skill_md = (staging_path / "SKILL.md").read_text()
 
     if safety_report.get("dangerous_patterns"):
-        print("\n  ⚠ Dangerous patterns detected:")
+        print("\n  Dangerous patterns:")
         for p in safety_report["dangerous_patterns"]:
             print(f"    - {p}")
 
-    if safety_report.get("network_attempts"):
-        print("\n  ⚠ Network access attempted:")
-        for n in safety_report["network_attempts"]:
-            print(f"    - {n}")
+    if safety_report.get("network_urls"):
+        print("\n  Network URLs found:")
+        for u in safety_report["network_urls"]:
+            print(f"    - {u}")
 
-    print(f"\n  Current SKILL.md preview ({len(skill_md)} chars):")
-    print("  " + "\n  ".join(skill_md[:500].splitlines()))
+    print(f"\n  SKILL.md preview ({len(skill_md)} chars):")
+    for line in skill_md[:500].splitlines():
+        print(f"    {line}")
     if len(skill_md) > 500:
-        print("  ...")
+        print("    ...")
 
-    choice = input("\n  [a]pprove / [c]ustomize with Claude / [r]eject? ").strip().lower()
+    choice = input("\n  [a]pprove to developing / [r]eject? ").strip().lower()
 
     if choice == "r":
         print("  Rejected. Cleaning up staging.")
-        import shutil
         shutil.rmtree(staging_path)
         sys.exit(0)
 
-    if choice == "c":
-        skill_md = customize_with_claude(staging_path)
-        (staging_path / "SKILL.md").write_text(skill_md)
-        print("  SKILL.md updated with Claude improvements.")
-
-    # Move from staging → generated
-    skill_name = staging_path.name
-    dest = GENERATED_DIR / skill_name
+    # Move staging → developing
+    DEVELOPING_DIR.mkdir(parents=True, exist_ok=True)
+    dest = DEVELOPING_DIR / staging_path.name
     if dest.exists():
-        import shutil
         shutil.rmtree(dest)
     staging_path.rename(dest)
-    print(f"  Moved to: {dest}")
+    print(f"  Moved to developing: {dest}")
     return dest
 
 
-def customize_with_claude(staging_path: Path) -> str:
-    """Use Claude API to analyze and improve the skill."""
+# ── Step 4: Customize + Benchmark Loop ──────────────────────────────────
+
+def develop_loop(dev_path: Path, task_id: str):
+    """Iterate: customize with Claude → benchmark → repeat."""
+    from benchmark import benchmark_task, save_benchmark_result, show_benchmark_history
+
+    iteration = 0
+    while True:
+        iteration += 1
+        print(f"\n  ── Iteration {iteration} ──")
+        print(f"  [b]enchmark / [c]ustomize with Claude / [e]dit manually / [d]one")
+        choice = input("  > ").strip().lower()
+
+        if choice == "d":
+            break
+
+        if choice == "b":
+            print(f"  Running benchmark: {task_id}...")
+            result = benchmark_task(task_id, skill_path=dev_path)
+            save_benchmark_result(dev_path, task_id, result, label=f"iter-{iteration}")
+            print(f"  Score: {result.get('score', 'N/A')}")
+            show_benchmark_history(dev_path)
+
+        elif choice == "c":
+            print("  Customizing with Claude API...")
+            new_md = customize_with_claude(dev_path, task_id)
+            (dev_path / "SKILL.md").write_text(new_md)
+            print("  SKILL.md updated.")
+            # Show diff size
+            print(f"  New SKILL.md: {len(new_md)} chars")
+
+        elif choice == "e":
+            print(f"  Edit the file directly:")
+            print(f"    {dev_path / 'SKILL.md'}")
+            input("  Press Enter when done editing...")
+
+        else:
+            print("  Invalid choice.")
+
+
+def customize_with_claude(dev_path: Path, task_id: str = "") -> str:
+    """Use Claude API to improve the skill, optionally using benchmark failure context."""
     import anthropic
 
     client = anthropic.Anthropic()
-    skill_md = (staging_path / "SKILL.md").read_text()
+    skill_md = (dev_path / "SKILL.md").read_text()
 
+    # Gather scripts content
     scripts_content = ""
-    scripts_dir = staging_path / "scripts"
+    scripts_dir = dev_path / "scripts"
     if scripts_dir.exists():
         for f in scripts_dir.iterdir():
             if f.is_file():
                 scripts_content += f"\n--- {f.name} ---\n{f.read_text()}\n"
+
+    # Gather benchmark history for context
+    benchmark_context = ""
+    benchmarks_dir = dev_path / "_benchmarks"
+    if benchmarks_dir.exists():
+        runs = sorted(benchmarks_dir.glob("run-*.json"))
+        if runs:
+            latest = json.loads(runs[-1].read_text())
+            benchmark_context = f"\nLatest benchmark result:\n{json.dumps(latest, indent=2)}\n"
+
+    # Gather task instruction for context
+    task_context = ""
+    if task_id:
+        task_instruction = SKILLSBENCH_DIR / "tasks-no-skills" / task_id / "instruction.md"
+        if task_instruction.exists():
+            task_context = f"\nTask instruction ({task_id}):\n{task_instruction.read_text()[:2000]}\n"
 
     message = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=4096,
         messages=[{
             "role": "user",
-            "content": f"""Analyze this agent skill and improve it.
+            "content": f"""Analyze this agent skill and improve it for better benchmark performance.
 
 Current SKILL.md:
 {skill_md}
 
 Scripts bundled with the skill:
 {scripts_content if scripts_content else "(none)"}
+{benchmark_context}
+{task_context}
 
-Improve the SKILL.md to be more effective:
-- Make instructions clearer and more actionable
+Improve the SKILL.md:
+- Make instructions clearer and more actionable for the target task
+- Add specific step-by-step guidance
 - Add edge case handling
 - Ensure scripts are referenced correctly
 - Keep it under 500 lines
@@ -147,16 +210,20 @@ Return ONLY the improved SKILL.md content, nothing else."""
     return message.content[0].text
 
 
-# ── Step 4: Benchmark ──────────────────────────────────────────────────
+# ── Step 5: Finalize → generated/ ──────────────────────────────────────
 
-def run_benchmark(task_id: str, skill_path: Path | None) -> dict:
-    """Run SkillsBench benchmark via harbor."""
-    from benchmark import benchmark_task
+def finalize(dev_path: Path) -> Path:
+    """Move from developing/ to generated/."""
+    GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+    dest = GENERATED_DIR / dev_path.name
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(dev_path, dest)
+    # Keep developing copy for reference, or clean up
+    shutil.rmtree(dev_path)
+    print(f"  Finalized: {dest}")
+    return dest
 
-    return benchmark_task(task_id, skill_path)
-
-
-# ── Step 5: Link Skills ────────────────────────────────────────────────
 
 def link_skills():
     """Run link_skills.sh to update .claude/skills/ symlinks."""
@@ -184,55 +251,48 @@ def main():
     parser.add_argument("task_id", help="SkillsBench task ID to benchmark against")
     parser.add_argument("--skip-sundial", action="store_true",
                         help="Use existing skill in staging/ instead of fetching")
-    parser.add_argument("--skip-benchmark", action="store_true",
-                        help="Skip harbor benchmark (useful for testing)")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume developing an existing skill in developing/")
     args = parser.parse_args()
 
     print("=" * 60)
     print("  Personalize Skill Factory")
     print("=" * 60)
 
-    # Step 1: Fetch
-    if args.skip_sundial:
-        staging_path = STAGING_DIR / args.skill_query
-        if not staging_path.exists():
-            print(f"  Error: {staging_path} not found in staging/")
+    if args.resume:
+        # Resume from developing/
+        dev_path = DEVELOPING_DIR / args.skill_query
+        if not dev_path.exists():
+            print(f"  Error: {dev_path} not found in developing/")
             sys.exit(1)
-        print(f"\n[1/6] Using existing skill: {staging_path}")
+        print(f"\n  Resuming: {dev_path}")
     else:
-        print(f"\n[1/6] Fetching skill: {args.skill_query}")
-        staging_path = fetch_skill(args.skill_query)
+        # Step 1: Fetch
+        if args.skip_sundial:
+            staging_path = STAGING_DIR / args.skill_query
+            if not staging_path.exists():
+                print(f"  Error: {staging_path} not found in staging/")
+                sys.exit(1)
+            print(f"\n[1/6] Using existing: {staging_path}")
+        else:
+            print(f"\n[1/6] Fetching: {args.skill_query}")
+            staging_path = fetch_skill(args.skill_query)
 
-    # Step 2: Safety
-    print(f"\n[2/6] Running safety check...")
-    safety_report = check_safety(staging_path)
+        # Step 2: Safety
+        print(f"\n[2/6] Safety check...")
+        safety_report = check_safety(staging_path)
 
-    # Step 3: Approve + Customize
-    print(f"\n[3/6] Review & customize")
-    generated_path = approve_and_customize(staging_path, safety_report)
+        # Step 3: Approve → developing
+        print(f"\n[3/6] Review & approve")
+        dev_path = approve_to_developing(staging_path, safety_report)
 
-    # Step 4: Benchmark
-    if not args.skip_benchmark:
-        print(f"\n[4/6] Benchmarking: {args.task_id}")
-        print("  Running before (no skill)...")
-        before = run_benchmark(args.task_id, skill_path=None)
-        print(f"  Before score: {before.get('score', 'N/A')}")
+    # Step 4: Develop loop
+    print(f"\n[4/6] Develop: customize + benchmark")
+    develop_loop(dev_path, args.task_id)
 
-        print("  Running after (with skill)...")
-        after = run_benchmark(args.task_id, skill_path=generated_path)
-        print(f"  After score:  {after.get('score', 'N/A')}")
-
-        print(f"\n  {'─' * 40}")
-        print(f"  Before: {before.get('score', 'N/A')}")
-        print(f"  After:  {after.get('score', 'N/A')}")
-        delta = (after.get('score', 0) or 0) - (before.get('score', 0) or 0)
-        print(f"  Delta:  {delta:+.1f}")
-        print(f"  {'─' * 40}")
-    else:
-        print(f"\n[4/6] Benchmark skipped")
-
-    # Step 5: Link
-    print(f"\n[5/6] Linking skills to .claude/skills/")
+    # Step 5: Finalize
+    print(f"\n[5/6] Finalizing...")
+    generated_path = finalize(dev_path)
     link_skills()
 
     # Step 6: Publish

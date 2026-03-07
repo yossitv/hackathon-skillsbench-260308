@@ -1,1 +1,11 @@
 .env
+__pycache__/
+
+# Unverified skills from Sundial (quarantine zone)
+personalize-skill-factory/skills/staging/
+
+# Benchmark run results (auto-generated, can be large)
+_benchmarks/
+
+# Sundial cross-client install dir (skills are quarantined immediately)
+.agents/
