@@ -69,3 +69,7 @@ harbor run -p tasks/<task-id> -a claude-code -m 'anthropic/claude-opus-4-5'
 | terminal-bench-3 | Task submission repo |
 | jfkarena | Arena system |
 | paperbench | Paper benchmark |
+
+## Verification Script
+
+- [`scripts/verify_skillsbench.sh`](scripts/verify_skillsbench.sh) — Harbor CLI 動作確認、タスク一覧、タスクバリデーション

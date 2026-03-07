@@ -31,6 +31,7 @@
 - **使い方:** 失敗テストログ + 現行 SKILL.md を送信 → 改善版を返却
 - **ハッカソンクレジット:** Discord で申請可能
 - **参考:** https://platform.claude.com/docs/en/about-claude/models/overview
+- **検証:** docs/references/scripts/verify_claude_api.py
 
 ### Daytona (daytona.io) — optional
 - **役割:** 隔離されたサンドボックス環境
@@ -39,3 +40,6 @@
 - **Pricing:** $200 free compute included, vCPU $0.0504/h
 - **MVP では不使用** — ローカル実行で十分。Phase 2 で統合検討
 - **参考:** docs/references/daytona-io.md
+
+### 全サービス一括検証
+- `bash docs/references/scripts/verify_all.sh` で 4 サービスをまとめて検証可能

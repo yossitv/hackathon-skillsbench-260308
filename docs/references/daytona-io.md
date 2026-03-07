@@ -81,3 +81,9 @@ $200 in free compute included. GPU options available.
 - SSH Access to any sandbox
 - VS Code Browser - open sandboxes in editor
 - Web Terminal - full terminal in browser
+
+## Verification Script
+
+- [`scripts/verify_daytona.py`](scripts/verify_daytona.py) — サンドボックス作成→コード実行→削除を確認
+- SDK パッケージ名: `daytona-sdk` (`import daytona_sdk`)
+- 削除メソッド: `daytona.delete(sandbox)` (`remove` は廃止)

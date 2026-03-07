@@ -56,3 +56,7 @@ Claude Code, Cursor, GitHub Copilot, ChatGPT, Claude.ai, Codex CLI, Antigravity,
 - **Composable** - combine with other skills
 - **Self-documenting** - easy to audit
 - **Reusable** - any agent that reads markdown
+
+## Verification Script
+
+- [`scripts/verify_sundial.sh`](scripts/verify_sundial.sh) — スキル検索 (`--json`) とインストール済み一覧を確認
