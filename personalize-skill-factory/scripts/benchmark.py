@@ -58,13 +58,25 @@ def remove_skill(injected_path: Path):
         print(f"  Cleaned up: {injected_path}")
 
 
+def get_harbor_bin() -> str:
+    """Find harbor binary in skillsbench venv."""
+    venv_bin = SKILLSBENCH_DIR / ".venv" / "bin" / "harbor"
+    if venv_bin.exists():
+        return str(venv_bin)
+    # Fallback: try uv run
+    return "harbor"
+
+
 def run_harbor(task_id: str, model: str = "anthropic/claude-sonnet-4-20250514") -> dict:
     """Execute harbor run and parse results."""
+    harbor = get_harbor_bin()
     cmd = [
-        "uv", "run", "harbor", "run",
+        harbor, "run",
         "-p", f"tasks-no-skills/{task_id}",
         "-a", "claude-code",
         "-m", model,
+        "-k", "1",
+        "-n", "1",
     ]
 
     print(f"  $ {' '.join(cmd)}")
@@ -82,45 +94,75 @@ def run_harbor(task_id: str, model: str = "anthropic/claude-sonnet-4-20250514") 
     return parse_results(task_id, result)
 
 
+def find_latest_job_dir() -> Path | None:
+    """Find the most recent harbor job directory."""
+    jobs_dir = SKILLSBENCH_DIR / "jobs"
+    if not jobs_dir.exists():
+        return None
+    job_dirs = sorted(jobs_dir.iterdir(), reverse=True)
+    return job_dirs[0] if job_dirs else None
+
+
 def parse_results(task_id: str, harbor_result: subprocess.CompletedProcess) -> dict:
-    """Parse harbor output, reward.txt, and ctrf.json."""
+    """Parse harbor output from result.json, reward.txt, and ctrf.json."""
     report = {
         "task_id": task_id,
         "score": None,
-        "tests": None,
+        "tests_summary": None,
+        "tests_failed": [],
         "harbor_returncode": harbor_result.returncode,
         "harbor_stdout": harbor_result.stdout[-1000:] if harbor_result.stdout else "",
         "harbor_stderr": harbor_result.stderr[-500:] if harbor_result.stderr else "",
     }
 
-    # Try to find reward.txt and ctrf.json from harbor output
-    # Harbor typically writes to /logs/verifier/ inside container
-    # but also may output the score in stdout
-    stdout = harbor_result.stdout or ""
+    # Harbor writes results to jobs/<timestamp>/<task>__<id>/
+    job_dir = find_latest_job_dir()
+    if not job_dir:
+        return report
 
-    # Parse score from stdout if available
-    for line in stdout.splitlines():
-        line = line.strip()
-        if line in ("0", "1"):
-            report["score"] = int(line)
-        if "reward" in line.lower() and ("0" in line or "1" in line):
-            try:
-                report["score"] = int(line.split()[-1])
-            except (ValueError, IndexError):
-                pass
+    # Find trial dir matching this task
+    trial_dirs = [d for d in job_dir.iterdir() if d.is_dir() and d.name.startswith(task_id)]
+    if not trial_dirs:
+        return report
 
-    # Try to parse ctrf.json if harbor left it accessible
-    # This path may vary based on harbor's output location
-    for ctrf_candidate in [
-        SKILLSBENCH_DIR / "logs" / task_id / "verifier" / "ctrf.json",
-        SKILLSBENCH_DIR / ".harbor" / task_id / "ctrf.json",
-    ]:
-        if ctrf_candidate.exists():
+    trial_dir = trial_dirs[-1]  # latest trial
+
+    # Parse result.json for reward
+    result_json = trial_dir / "result.json"
+    if result_json.exists():
+        try:
+            data = json.loads(result_json.read_text())
+            rewards = data.get("verifier_result", {}).get("rewards", {})
+            report["score"] = rewards.get("reward")
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # Parse ctrf.json for test details
+    ctrf_json = trial_dir / "verifier" / "ctrf.json"
+    if ctrf_json.exists():
+        try:
+            ctrf = json.loads(ctrf_json.read_text())
+            summary = ctrf.get("results", {}).get("summary", {})
+            report["tests_summary"] = {
+                "total": summary.get("tests", 0),
+                "passed": summary.get("passed", 0),
+                "failed": summary.get("failed", 0),
+            }
+            # Collect failed test names for Claude to analyze
+            for test in ctrf.get("results", {}).get("tests", []):
+                if test.get("status") == "failed":
+                    report["tests_failed"].append(test.get("name", "unknown"))
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # Fallback: parse reward.txt
+    if report["score"] is None:
+        reward_txt = trial_dir / "verifier" / "reward.txt"
+        if reward_txt.exists():
             try:
-                report["tests"] = json.loads(ctrf_candidate.read_text())
-            except json.JSONDecodeError:
+                report["score"] = float(reward_txt.read_text().strip())
+            except ValueError:
                 pass
-            break
 
     return report
 
