@@ -10,15 +10,15 @@ End-to-end pipeline: fetch → quarantine → safety check → customize → ben
 ## Quick Start
 
 ```bash
-# Full pipeline
-# Default (Claude API)
+# Full pipeline (from Sundial)
 uv run personalize-skill-factory/scripts/factory.py <skill-query> <task-id>
 
-# With Hermes Agent (multi-model)
-uv run personalize-skill-factory/scripts/factory.py <skill-query> <task-id> --optimizer hermes
-uv run personalize-skill-factory/scripts/factory.py <skill-query> <task-id> --optimizer hermes:deepseek/deepseek-r1
+# AI generates skill from scratch (no Sundial needed)
+uv run personalize-skill-factory/scripts/factory.py --generate <task-id>
+uv run personalize-skill-factory/scripts/factory.py --generate <task-id> --auto
 
-# With OpenRouter (any model)
+# With multi-model optimization
+uv run personalize-skill-factory/scripts/factory.py --generate <task-id> --optimizer smart
 uv run personalize-skill-factory/scripts/factory.py <skill-query> <task-id> --optimizer openrouter:google/gemini-2.5-pro
 
 # Auto mode with comparison
@@ -32,6 +32,10 @@ uv run personalize-skill-factory/scripts/publish.py skills/generated/<name>
 ```
 
 ## Pipeline Steps
+
+### 0. Generate from Scratch (`--generate` in `factory.py`)
+
+AI analyzes the SkillsBench task (instruction.md, tests, Dockerfile, existing scripts) and generates a SKILL.md from scratch. Skips fetch/safety/approve — goes straight to developing/ for customize + benchmark.
 
 ### 1. Fetch & Quarantine (`quarantine.py`)
 
@@ -117,6 +121,8 @@ personalize-skill-factory/
 ## Skill Lifecycle
 
 ```
+   --generate ──┐
+                ▼
 staging → developing → generated
   │          │             │
   │          ├── customize │

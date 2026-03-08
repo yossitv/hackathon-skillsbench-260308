@@ -7,16 +7,22 @@ Personalize Skill Factory — Main Pipeline
 Usage:
     uv run personalize-skill-factory/scripts/factory.py <skill-query> <task-id>
     uv run personalize-skill-factory/scripts/factory.py <skill-query> <task-id> --auto
+    uv run personalize-skill-factory/scripts/factory.py --generate <task-id>
+    uv run personalize-skill-factory/scripts/factory.py --generate <task-id> --auto
 
 Flow:
     staging → developing → generated
 
-    1. Fetch from Sundial → quarantine to staging/
-    2. Safety check (Claude static + Daytona dynamic)
-    3. Approve → move to developing/
+    1. Fetch from Sundial → quarantine to staging/  (or --generate to create from scratch)
+    2. Safety check (Claude static + Daytona dynamic)  (skipped for --generate)
+    3. Approve → move to developing/                   (skipped for --generate)
     4. Customize + benchmark loop in developing/
     5. Finalize → move to generated/, link to .claude/skills/
     6. Optionally publish to Sundial
+
+Generate mode (--generate):
+    AI analyzes the SkillsBench task (instruction.md, tests, environment) and
+    generates a SKILL.md from scratch. No Sundial needed.
 
 Auto mode (--auto):
     Runs the full pipeline without user interaction.
@@ -50,6 +56,210 @@ def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     """Run a command, print it, and return the result."""
     print(f"  $ {' '.join(cmd)}")
     return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+
+
+# ── Step 0: Generate Skill from Scratch ─────────────────────────────────
+
+GENERATE_PROMPT = """You are an expert at creating agent skills (agentskills.io spec).
+
+Given the following SkillsBench task, generate a SKILL.md that helps an AI agent solve it.
+
+## Task: {task_id}
+
+### Instruction
+{instruction}
+
+### Test file (what the agent's output is validated against)
+{test_content}
+
+### Environment
+- Docker image: {docker_image}
+- Difficulty: {difficulty}
+- Category: {category}
+- Tags: {tags}
+
+### Existing skill scripts available
+{existing_scripts}
+
+## Rules for generating SKILL.md
+
+1. Start with YAML frontmatter: `---\\nname: <skill-name>\\ndescription: <one-line>\\n---`
+2. The skill name should be a short kebab-case identifier derived from the task
+3. Focus on GUIDING the agent, not implementing the solution
+4. Include: when to use, API reference for any bundled scripts, output format requirements
+5. Highlight specific requirements from tests (exact field names, shapes, formats)
+6. Do NOT include full solution code — the agent should write its own
+7. DO include concrete examples of expected output formats
+8. Keep it under 200 lines
+9. If scripts/ exist, document their API (classes, methods, parameters)
+
+Return ONLY the SKILL.md content, nothing else."""
+
+
+def generate_skill(task_id: str, optimizer: str = "claude") -> Path:
+    """AI generates a skill from scratch by analyzing the SkillsBench task."""
+
+    task_dir = SKILLSBENCH_DIR / "tasks-no-skills" / task_id
+    if not task_dir.exists():
+        # Try tasks/ as fallback
+        task_dir = SKILLSBENCH_DIR / "tasks" / task_id
+    if not task_dir.exists():
+        print(f"  Error: task '{task_id}' not found in tasks-no-skills/ or tasks/")
+        sys.exit(1)
+
+    # Read task context
+    instruction = ""
+    instr_path = task_dir / "instruction.md"
+    if instr_path.exists():
+        instruction = instr_path.read_text()
+
+    test_content = ""
+    test_path = task_dir / "tests" / "test_outputs.py"
+    if test_path.exists():
+        test_content = test_path.read_text()[:4000]
+
+    # Parse task.toml
+    docker_image = "unknown"
+    difficulty = "unknown"
+    category = "unknown"
+    tags = ""
+    toml_path = task_dir / "task.toml"
+    if toml_path.exists():
+        toml_text = toml_path.read_text()
+        import re
+        m = re.search(r'image\s*=\s*"([^"]+)"', toml_text)
+        if m:
+            docker_image = m.group(1)
+        m = re.search(r'difficulty\s*=\s*"([^"]+)"', toml_text)
+        if m:
+            difficulty = m.group(1)
+        m = re.search(r'category\s*=\s*"([^"]+)"', toml_text)
+        if m:
+            category = m.group(1)
+        m = re.search(r'tags\s*=\s*\[([^\]]+)\]', toml_text)
+        if m:
+            tags = m.group(1)
+
+    # Check for existing scripts in the task's skill directory
+    existing_scripts = ""
+    skills_dir = task_dir / "environment" / "skills"
+    if skills_dir.exists():
+        for skill_dir in skills_dir.iterdir():
+            if not skill_dir.is_dir():
+                continue
+            scripts_path = skill_dir / "scripts"
+            if scripts_path.exists():
+                for f in scripts_path.iterdir():
+                    if f.is_file() and f.suffix in (".py", ".js", ".sh"):
+                        content = f.read_text()[:3000]
+                        existing_scripts += f"\n--- {skill_dir.name}/scripts/{f.name} ---\n{content}\n"
+
+    prompt = GENERATE_PROMPT.format(
+        task_id=task_id,
+        instruction=instruction,
+        test_content=test_content,
+        docker_image=docker_image,
+        difficulty=difficulty,
+        category=category,
+        tags=tags,
+        existing_scripts=existing_scripts or "(none)",
+    )
+
+    # Generate via optimizer
+    print(f"  Generating skill for task '{task_id}' with {optimizer}...")
+    if optimizer == "claude":
+        import anthropic
+        client = anthropic.Anthropic()
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        skill_md = message.content[0].text
+    elif optimizer.startswith("openrouter:"):
+        import urllib.request
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENROUTER_API_KEY not set")
+        model = optimizer.split(":", 1)[1]
+        body = json.dumps({
+            "model": model,
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": prompt}],
+        }).encode()
+        req = urllib.request.Request(
+            "https://openrouter.ai/api/v1/chat/completions",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read())
+        skill_md = data["choices"][0]["message"]["content"]
+    else:
+        # Default to claude for generation
+        import anthropic
+        client = anthropic.Anthropic()
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        skill_md = message.content[0].text
+
+    # Clean up: extract SKILL.md content if wrapped in markdown fences
+    if "```" in skill_md:
+        import re
+        match = re.search(r'```(?:markdown|yaml|md)?\n(---\n.*?)```', skill_md, re.DOTALL)
+        if match:
+            skill_md = match.group(1).rstrip()
+
+    # Derive skill name from task_id
+    skill_name = task_id.replace("-", "_")
+
+    # Place in developing/
+    DEVELOPING_DIR.mkdir(parents=True, exist_ok=True)
+    dest = DEVELOPING_DIR / skill_name
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+
+    # Write generated SKILL.md
+    (dest / "SKILL.md").write_text(skill_md)
+
+    # Copy scripts from task environment if they exist
+    if skills_dir.exists():
+        for existing_skill_dir in skills_dir.iterdir():
+            scripts_src = existing_skill_dir / "scripts"
+            if scripts_src.exists() and scripts_src.is_dir():
+                shutil.copytree(scripts_src, dest / "scripts")
+                break
+
+    # Save as baseline (AI-generated v0)
+    baseline_dir = dest / "_baseline"
+    baseline_dir.mkdir(exist_ok=True)
+    shutil.copy2(dest / "SKILL.md", baseline_dir / "SKILL.md")
+    if (dest / "scripts").exists():
+        shutil.copytree(dest / "scripts", baseline_dir / "scripts")
+
+    # Also install into the task for benchmarking
+    task_skill_dir = task_dir / "environment" / "skills" / skill_name
+    task_skill_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(dest / "SKILL.md", task_skill_dir / "SKILL.md")
+    if (dest / "scripts").exists():
+        scripts_dest = task_skill_dir / "scripts"
+        if scripts_dest.exists():
+            shutil.rmtree(scripts_dest)
+        shutil.copytree(dest / "scripts", scripts_dest)
+
+    print(f"  Generated skill: {dest}")
+    print(f"  SKILL.md: {len(skill_md)} chars")
+    log_event("generate", skill_name, "developing",
+              task_id=task_id, optimizer=optimizer, skill_md_chars=len(skill_md))
+
+    return dest
 
 
 # ── Step 1: Fetch from Sundial ──────────────────────────────────────────
@@ -509,8 +719,11 @@ def publish_skill(skill_path: Path, auto: bool = False):
 
 def main():
     parser = argparse.ArgumentParser(description="Personalize Skill Factory")
-    parser.add_argument("skill_query", help="Skill name or search query for Sundial")
+    parser.add_argument("skill_query", nargs="?", default=None,
+                        help="Skill name or search query for Sundial (not needed with --generate)")
     parser.add_argument("task_id", help="SkillsBench task ID to benchmark against")
+    parser.add_argument("--generate", action="store_true",
+                        help="AI generates a skill from scratch by analyzing the task (no Sundial needed)")
     parser.add_argument("--skip-sundial", action="store_true",
                         help="Use existing skill in staging/ instead of fetching")
     parser.add_argument("--resume", action="store_true",
@@ -540,7 +753,13 @@ def main():
     print(f"  Optimizer: {optimizer}")
     print("=" * 60)
 
-    if args.resume:
+    if args.generate:
+        # AI generates skill from scratch — skip Sundial, safety, approve
+        print(f"\n[1/6] Generating skill from task: {args.task_id}")
+        dev_path = generate_skill(args.task_id, optimizer=optimizer)
+        print(f"\n[2/6] Safety check... SKIPPED (AI-generated)")
+        print(f"\n[3/6] Review & approve... SKIPPED (AI-generated)")
+    elif args.resume:
         # Resume from developing/
         dev_path = DEVELOPING_DIR / args.skill_query
         if not dev_path.exists():
@@ -548,6 +767,9 @@ def main():
             sys.exit(1)
         print(f"\n  Resuming: {dev_path}")
     else:
+        if not args.skill_query:
+            print("  Error: skill_query required (or use --generate)")
+            sys.exit(1)
         # Step 1: Fetch
         if args.skip_sundial:
             staging_path = STAGING_DIR / args.skill_query
