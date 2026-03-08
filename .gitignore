@@ -7,5 +7,8 @@ personalize-skill-factory/skills/staging/
 # Benchmark run results (auto-generated, can be large)
 _benchmarks/
 
+# Pipeline event logs (auto-generated per session)
+personalize-skill-factory/logs/
+
 # Sundial cross-client install dir (skills are quarantined immediately)
 .agents/

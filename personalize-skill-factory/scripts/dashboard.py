@@ -9,6 +9,7 @@ Usage:
 """
 
 import json
+import subprocess
 from difflib import unified_diff
 from pathlib import Path
 
@@ -139,7 +140,7 @@ with st.sidebar:
 
 # ── Tab Layout ─────────────────────────────────────────────────────────
 
-tab_pipeline, tab_benchmark, tab_diff = st.tabs(["Pipeline Status", "Benchmark Trends", "Skill Diff"])
+tab_pipeline, tab_benchmark, tab_diff, tab_publish = st.tabs(["Pipeline Status", "Benchmark Trends", "Skill Diff", "Publish"])
 
 # ── Tab 1: Pipeline Status ─────────────────────────────────────────────
 
@@ -366,3 +367,68 @@ with tab_diff:
                 st.code(baseline_md, language="markdown")
             with col_r:
                 st.code(current_md, language="markdown")
+
+
+# ── Tab 4: Publish ────────────────────────────────────────────────────
+
+with tab_publish:
+    st.subheader("Publish to Sundial Hub")
+
+    # Check if skill is in generated/
+    generated_entry = next((s for s in skill_stages if s["stage"] == "generated"), None)
+
+    if not generated_entry:
+        st.warning(f"**{selected_skill}** is not finalized yet. Only skills in `generated/` can be published.")
+        current_stage = skill_stages[-1]["stage"] if skill_stages else "unknown"
+        st.info(f"Current stage: **{current_stage}**. Run the pipeline to finalize first.")
+    else:
+        skill_path = Path(generated_entry["path"])
+        skill_md_path = skill_path / "SKILL.md"
+
+        # Show skill preview
+        if skill_md_path.exists():
+            with st.expander("SKILL.md Preview", expanded=False):
+                st.code(skill_md_path.read_text(), language="markdown")
+
+        # Publish settings
+        st.markdown("---")
+        col_vis, col_cat = st.columns(2)
+        with col_vis:
+            visibility = st.radio("Visibility", ["public", "private"], horizontal=True)
+        with col_cat:
+            categories = st.text_input("Categories", placeholder="coding, research, data")
+
+        changelog = st.text_area("Changelog", placeholder="What changed in this version?")
+
+        # Publish button
+        st.markdown("---")
+        if st.button("Publish to Sundial Hub", type="primary", use_container_width=True):
+            cmd = ["npx", "sundial-hub", "push", str(skill_path), "--visibility", visibility]
+            if categories.strip():
+                cmd.extend(["--categories", categories.strip()])
+            if changelog.strip():
+                cmd.extend(["--changelog", changelog.strip()])
+
+            with st.status("Publishing...", expanded=True) as status:
+                st.code(f"$ {' '.join(cmd)}")
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+                if result.returncode == 0:
+                    status.update(label="Published!", state="complete")
+                    st.success(f"Published **{selected_skill}** to Sundial Hub.")
+                    if result.stdout.strip():
+                        st.code(result.stdout.strip())
+
+                    # Log the event
+                    from event_log import emit
+                    emit("publish", selected_skill, "generated",
+                         visibility=visibility,
+                         categories=categories.strip() or None,
+                         changelog=changelog.strip() or None)
+                else:
+                    status.update(label="Failed", state="error")
+                    st.error("Publish failed.")
+                    if result.stderr.strip():
+                        st.code(result.stderr.strip())
+                    if result.stdout.strip():
+                        st.code(result.stdout.strip())
