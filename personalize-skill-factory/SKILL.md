@@ -1,6 +1,6 @@
 ---
 name: personalize-skill-factory
-description: "Personalize agent skills pipeline: fetch from Sundial, verify safety in Daytona sandbox, customize with Claude API, benchmark on SkillsBench (before/after comparison), and publish. Use when user wants to find, improve, benchmark, or personalize an agent skill."
+description: "Personalize agent skills pipeline: fetch from Sundial, verify safety in Daytona sandbox, customize with Claude API, benchmark on SkillsBench (before/after comparison), visualize with dashboard, and publish. Use when user wants to find, improve, benchmark, visualize, or personalize an agent skill."
 ---
 
 # Personalize Skill Factory
@@ -76,6 +76,17 @@ Run SkillsBench tasks via Harbor:
 
 Push approved skill to Sundial Hub via `npx sundial-hub push`.
 
+### 6. Dashboard (`dashboard.py`)
+
+View pipeline status, benchmark trends, and SKILL.md diffs in the browser.
+
+```bash
+uv run --with streamlit --with pandas --with altair \
+  streamlit run personalize-skill-factory/scripts/dashboard.py
+```
+
+When the user asks to "show the dashboard", "view pipeline status", or "open the dashboard", run the command above.
+
 ## Directory Structure
 
 ```
@@ -86,6 +97,8 @@ personalize-skill-factory/
 │   ├── quarantine.py     # Sundial fetch + isolate
 │   ├── safety_check.py   # Claude static + Daytona dynamic analysis
 │   ├── benchmark.py      # Harbor run wrapper + score comparison
+│   ├── dashboard.py      # Streamlit dashboard (pipeline, benchmarks, diffs)
+│   ├── event_log.py      # Structured JSONL event logger
 │   ├── publish.py        # Sundial push
 │   └── link_skills.sh    # Symlink generated/ → .claude/skills/
 ├── skills/

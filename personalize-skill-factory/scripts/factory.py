@@ -35,6 +35,8 @@ from pathlib import Path
 # Ensure sibling scripts are importable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from event_log import emit as log_event
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 FACTORY_ROOT = REPO_ROOT / "personalize-skill-factory"
 SKILLSBENCH_DIR = FACTORY_ROOT / "skillsbench"
@@ -59,6 +61,7 @@ def fetch_skill(skill_query: str) -> Path:
     skill_name = sundial_add(skill_query)
     staging_path = quarantine_skill(skill_name)
     print(f"  Quarantined to: {staging_path}")
+    log_event("fetch", skill_name, "staging", query=skill_query, path=str(staging_path))
     return staging_path
 
 
@@ -75,6 +78,11 @@ def check_safety(staging_path: Path) -> dict:
     print(f"    Network URLs:       {len(report.get('network_urls', []))}")
     if report.get("dynamic_skipped"):
         print(f"    Dynamic analysis:   skipped ({report.get('dynamic_reason', '')})")
+    log_event("safety_check", staging_path.name, "staging",
+              recommendation=report.get("recommendation", "?"),
+              dangerous_patterns=len(report.get("dangerous_patterns", [])),
+              network_urls=len(report.get("network_urls", [])),
+              dynamic_skipped=report.get("dynamic_skipped", False))
     return report
 
 
@@ -135,6 +143,9 @@ def approve_to_developing(staging_path: Path, safety_report: dict, auto: bool = 
             shutil.rmtree(baseline_scripts)
         shutil.copytree(scripts_src, baseline_scripts)
     print(f"  Baseline saved: {baseline_dir}")
+    log_event("approve", dest.name, "developing",
+              recommendation=safety_report.get("recommendation", "?"),
+              auto=auto)
 
     return dest
 
@@ -161,6 +172,8 @@ def develop_loop(dev_path: Path, task_id: str, optimizer: str = "claude"):
             result = benchmark_task(task_id, skill_path=dev_path)
             save_benchmark_result(dev_path, task_id, result, label=f"iter-{iteration}")
             print(f"  Score: {result.get('score', 'N/A')}")
+            log_event("benchmark", dev_path.name, "developing",
+                      label=f"iter-{iteration}", score=result.get("score"), task_id=task_id)
             show_benchmark_history(dev_path)
 
         elif choice == "v":
@@ -172,6 +185,8 @@ def develop_loop(dev_path: Path, task_id: str, optimizer: str = "claude"):
             (dev_path / "SKILL.md").write_text(new_md)
             print("  SKILL.md updated.")
             print(f"  New SKILL.md: {len(new_md)} chars")
+            log_event("customize", dev_path.name, "developing",
+                      optimizer=optimizer, iteration=iteration, skill_md_chars=len(new_md))
 
         elif choice == "e":
             print(f"  Edit the file directly:")
@@ -198,6 +213,8 @@ def auto_develop_loop(dev_path: Path, task_id: str, iterations: int = 1, optimiz
         save_benchmark_result(dev_path, task_id, baseline_result, label="baseline-sundial")
         baseline_score = baseline_result.get("score")
         print(f"  Baseline score: {baseline_score}")
+        log_event("benchmark", dev_path.name, "developing",
+                  label="baseline-sundial", score=baseline_score, task_id=task_id)
 
     for i in range(iterations):
         print(f"\n  ── Auto Iteration {i + 1}/{iterations} ──")
@@ -207,6 +224,8 @@ def auto_develop_loop(dev_path: Path, task_id: str, iterations: int = 1, optimiz
         new_md = customize_skill(dev_path, task_id, optimizer=optimizer)
         (dev_path / "SKILL.md").write_text(new_md)
         print(f"  SKILL.md updated ({len(new_md)} chars)")
+        log_event("customize", dev_path.name, "developing",
+                  optimizer=optimizer, iteration=i + 1, skill_md_chars=len(new_md))
 
         # Benchmark after customize
         print(f"  Benchmarking (personalized)...")
@@ -214,6 +233,9 @@ def auto_develop_loop(dev_path: Path, task_id: str, iterations: int = 1, optimiz
         save_benchmark_result(dev_path, task_id, after, label=f"auto-{i+1}-{optimizer}")
         after_score = after.get("score") or 0
         print(f"  Score: {after_score}")
+        log_event("benchmark", dev_path.name, "developing",
+                  label=f"auto-{i+1}-{optimizer}", score=after_score,
+                  task_id=task_id, iteration=i + 1)
 
         # Report vs baseline
         print(f"\n  {'─' * 50}")
@@ -457,6 +479,7 @@ def finalize(dev_path: Path) -> Path:
     # Keep developing copy for reference, or clean up
     shutil.rmtree(dev_path)
     print(f"  Finalized: {dest}")
+    log_event("finalize", dev_path.name, "generated", path=str(dest))
     return dest
 
 
