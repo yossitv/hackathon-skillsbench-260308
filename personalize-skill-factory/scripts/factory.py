@@ -264,9 +264,22 @@ def generate_skill(task_id: str, optimizer: str = "claude") -> Path:
 
 # ── Step 1: Fetch from Sundial ──────────────────────────────────────────
 
-def fetch_skill(skill_query: str) -> Path:
-    """Search Sundial, add skill, quarantine to staging/."""
-    from quarantine import quarantine_skill, sundial_add
+def fetch_skill(skill_query: str) -> Path | None:
+    """Search Sundial, add skill, quarantine to staging/.
+
+    Returns None if no skill found on Sundial (caller should fall back to generate).
+    """
+    from quarantine import quarantine_skill, sundial_add, sundial_find
+
+    # First check if Sundial has this skill
+    try:
+        results = sundial_find(skill_query)
+        if not results:
+            print(f"  No skills found on Sundial for '{skill_query}'")
+            return None
+    except (SystemExit, Exception) as e:
+        print(f"  Sundial search failed: {e}")
+        return None
 
     skill_name = sundial_add(skill_query)
     staging_path = quarantine_skill(skill_name)
@@ -753,24 +766,24 @@ def main():
     print(f"  Optimizer: {optimizer}")
     print("=" * 60)
 
-    if args.generate:
-        # AI generates skill from scratch — skip Sundial, safety, approve
-        print(f"\n[1/6] Generating skill from task: {args.task_id}")
-        dev_path = generate_skill(args.task_id, optimizer=optimizer)
-        print(f"\n[2/6] Safety check... SKIPPED (AI-generated)")
-        print(f"\n[3/6] Review & approve... SKIPPED (AI-generated)")
-    elif args.resume:
+    use_generate = args.generate
+
+    if args.resume:
         # Resume from developing/
-        dev_path = DEVELOPING_DIR / args.skill_query
+        dev_path = DEVELOPING_DIR / (args.skill_query or args.task_id.replace("-", "_"))
         if not dev_path.exists():
             print(f"  Error: {dev_path} not found in developing/")
             sys.exit(1)
         print(f"\n  Resuming: {dev_path}")
+    elif use_generate:
+        # Explicit --generate
+        print(f"\n[1/6] Generating skill from task: {args.task_id}")
+        dev_path = generate_skill(args.task_id, optimizer=optimizer)
+        print(f"\n[2/6] Safety check... SKIPPED (AI-generated)")
+        print(f"\n[3/6] Review & approve... SKIPPED (AI-generated)")
     else:
-        if not args.skill_query:
-            print("  Error: skill_query required (or use --generate)")
-            sys.exit(1)
-        # Step 1: Fetch
+        # Try Sundial first; auto-fallback to generate if not found
+        staging_path = None
         if args.skip_sundial:
             staging_path = STAGING_DIR / args.skill_query
             if not staging_path.exists():
@@ -778,16 +791,27 @@ def main():
                 sys.exit(1)
             print(f"\n[1/6] Using existing: {staging_path}")
         else:
-            print(f"\n[1/6] Fetching: {args.skill_query}")
-            staging_path = fetch_skill(args.skill_query)
+            query = args.skill_query or args.task_id
+            print(f"\n[1/6] Searching Sundial: {query}")
+            staging_path = fetch_skill(query)
 
-        # Step 2: Safety
-        print(f"\n[2/6] Safety check...")
-        safety_report = check_safety(staging_path)
+            if staging_path is None:
+                # Auto-fallback: Sundial has nothing → AI generates from scratch
+                print(f"  → Falling back to AI generation...")
+                print(f"\n[1/6] Generating skill from task: {args.task_id}")
+                dev_path = generate_skill(args.task_id, optimizer=optimizer)
+                print(f"\n[2/6] Safety check... SKIPPED (AI-generated)")
+                print(f"\n[3/6] Review & approve... SKIPPED (AI-generated)")
+                use_generate = True  # skip safety/approve below
 
-        # Step 3: Approve → developing
-        print(f"\n[3/6] Review & approve")
-        dev_path = approve_to_developing(staging_path, safety_report, auto=args.auto)
+        if not use_generate:
+            # Step 2: Safety
+            print(f"\n[2/6] Safety check...")
+            safety_report = check_safety(staging_path)
+
+            # Step 3: Approve → developing
+            print(f"\n[3/6] Review & approve")
+            dev_path = approve_to_developing(staging_path, safety_report, auto=args.auto)
 
     # Step 4: Develop loop
     print(f"\n[4/6] Develop: customize + benchmark")
