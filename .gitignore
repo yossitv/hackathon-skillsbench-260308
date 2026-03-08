@@ -12,3 +12,7 @@ personalize-skill-factory/logs/
 
 # Sundial cross-client install dir (skills are quarantined immediately)
 .agents/
+
+# Remote camera config and skill (contains credentials/connection info)
+.claude/remote-camera.json
+.claude/skills/remote-camera-capture/
