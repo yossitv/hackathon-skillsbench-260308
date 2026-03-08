@@ -1,5 +1,5 @@
 # /// script
-# dependencies = ["anthropic", "daytona-sdk"]
+# dependencies = ["anthropic", "daytona-sdk", "python-dotenv"]
 # ///
 """
 Personalize Skill Factory — Main Pipeline
@@ -38,12 +38,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 # Ensure sibling scripts are importable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from event_log import emit as log_event
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+load_dotenv(REPO_ROOT / ".env")
 FACTORY_ROOT = REPO_ROOT / "personalize-skill-factory"
 SKILLSBENCH_DIR = FACTORY_ROOT / "skillsbench"
 STAGING_DIR = FACTORY_ROOT / "skills" / "staging"

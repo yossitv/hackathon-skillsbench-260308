@@ -13,6 +13,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Ensure sibling scripts are importable
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from event_log import emit as log_event
+
 
 def publish_to_sundial(
     skill_path: Path,
@@ -63,6 +68,10 @@ def main():
         categories=args.categories,
         changelog=args.changelog,
     )
+
+    log_event("publish", args.skill_path.name, "generated",
+              success=ok, visibility=args.visibility)
+
     sys.exit(0 if ok else 1)
 
 

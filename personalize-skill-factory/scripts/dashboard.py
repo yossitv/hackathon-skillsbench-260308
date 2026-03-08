@@ -1,5 +1,5 @@
 # /// script
-# dependencies = ["streamlit", "pandas", "altair"]
+# dependencies = ["streamlit", "pandas", "altair", "streamlit-autorefresh"]
 # ///
 """
 Skill Factory Dashboard — Visualize the pipeline flow, benchmarks, and skill diffs.
@@ -16,6 +16,7 @@ from pathlib import Path
 import altair as alt
 import pandas as pd
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
 SKILLS_DIR = FACTORY_ROOT / "skills"
@@ -59,7 +60,7 @@ def load_events() -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], format="ISO8601")
     return df
 
 
@@ -100,7 +101,7 @@ def load_benchmarks(skill_path: Path) -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
     if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], format="ISO8601")
     return df
 
 
@@ -127,7 +128,15 @@ with st.sidebar:
         st.info("No skills found. Run the factory pipeline first.")
         st.stop()
 
-    selected_skill = st.selectbox("Select Skill", skill_names)
+    # Read skill from query params, fallback to first in list
+    query_skill = st.query_params.get("skill")
+    default_index = skill_names.index(query_skill) if query_skill in skill_names else 0
+
+    selected_skill = st.selectbox("Select Skill", skill_names, index=default_index,
+                                   key="skill_selector")
+
+    # Sync selection back to URL query params
+    st.query_params["skill"] = selected_skill
 
     # Show which stages this skill exists in
     skill_stages = [s for s in skills if s["name"] == selected_skill]
@@ -136,7 +145,11 @@ with st.sidebar:
         st.write(f"**[{stage_emoji}] {s['stage']}** — {s['benchmark_count']} benchmarks")
 
     st.divider()
-    st.caption("Auto-refresh: re-run to see latest data")
+    refresh_interval = st.selectbox("Auto-refresh interval", [None, 10, 30, 60], index=1,
+                                     format_func=lambda x: "Off" if x is None else f"{x}s")
+
+if refresh_interval:
+    st_autorefresh(interval=refresh_interval * 1000, key="dashboard_refresh")
 
 # ── Tab Layout ─────────────────────────────────────────────────────────
 
@@ -396,18 +409,22 @@ with tab_publish:
         with col_vis:
             visibility = st.radio("Visibility", ["public", "private"], horizontal=True)
         with col_cat:
-            categories = st.text_input("Categories", placeholder="coding, research, data")
+            ALLOWED_CATEGORIES = ["product", "research", "outreach", "coding", "data", "devops"]
+            selected_cats = st.multiselect("Categories", ALLOWED_CATEGORIES, default=["product"])
+            categories = ", ".join(selected_cats)
 
         changelog = st.text_area("Changelog", placeholder="What changed in this version?")
 
         # Publish button
         st.markdown("---")
         if st.button("Publish to Sundial Hub", type="primary", use_container_width=True):
-            cmd = ["npx", "sundial-hub", "push", str(skill_path), "--visibility", visibility]
+            if not changelog.strip():
+                st.warning("Please enter a changelog message before publishing.")
+                st.stop()
+            cmd = ["npx", "sundial-hub", "push", str(skill_path), "--visibility", visibility,
+                   "--changelog", changelog.strip()]
             if categories.strip():
                 cmd.extend(["--categories", categories.strip()])
-            if changelog.strip():
-                cmd.extend(["--changelog", changelog.strip()])
 
             with st.status("Publishing...", expanded=True) as status:
                 st.code(f"$ {' '.join(cmd)}")
@@ -415,9 +432,6 @@ with tab_publish:
 
                 if result.returncode == 0:
                     status.update(label="Published!", state="complete")
-                    st.success(f"Published **{selected_skill}** to Sundial Hub.")
-                    if result.stdout.strip():
-                        st.code(result.stdout.strip())
 
                     # Log the event
                     from event_log import emit
@@ -427,8 +441,41 @@ with tab_publish:
                          changelog=changelog.strip() or None)
                 else:
                     status.update(label="Failed", state="error")
-                    st.error("Publish failed.")
-                    if result.stderr.strip():
-                        st.code(result.stderr.strip())
-                    if result.stdout.strip():
+
+            # Show result banner outside st.status so it's prominent
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+                st.markdown(
+                    f"""<div style="background: linear-gradient(135deg, #dc2626 0%, #991b1b 100%);
+                    border-radius: 12px; padding: 24px; text-align: center; margin: 16px 0;">
+                    <div style="font-size: 48px;">&#10060;</div>
+                    <div style="font-size: 24px; font-weight: bold; color: white; margin: 8px 0;">
+                    Publish Failed</div>
+                    <div style="font-size: 14px; color: #fecaca; font-family: monospace;
+                    text-align: left; background: rgba(0,0,0,0.3); border-radius: 8px;
+                    padding: 12px; margin-top: 12px; white-space: pre-wrap;">{error_msg}</div>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+
+            if result.returncode == 0:
+                # Extract hub URL from stdout
+                import re
+                url_match = re.search(r"https://www\.sundialhub\.com/\S+", result.stdout)
+                hub_url = url_match.group(0) if url_match else None
+
+                st.balloons()
+                st.markdown(
+                    f"""<div style="background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+                    border-radius: 12px; padding: 24px; text-align: center; margin: 16px 0;">
+                    <div style="font-size: 48px;">&#9989;</div>
+                    <div style="font-size: 24px; font-weight: bold; color: white; margin: 8px 0;">
+                    Published Successfully!</div>
+                    <div style="font-size: 16px; color: #dcfce7;">{selected_skill} — {changelog.strip()}</div>
+                    {"<a href='" + hub_url + "' target='_blank' style='color: white; font-size: 14px; margin-top: 8px; display: inline-block;'>View on Sundial Hub &rarr;</a>" if hub_url else ""}
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+                if result.stdout.strip():
+                    with st.expander("Publish output"):
                         st.code(result.stdout.strip())

@@ -47,6 +47,8 @@ Search Sundial for a skill, install it, and immediately move from `.agents/skill
 
 ### 2. Safety Check (`safety_check.py`)
 
+**Pre-flight check**: Before running safety check, verify that required environment variables are set. Run `echo $ANTHROPIC_API_KEY` (and `echo $DAYTONA_API_KEY` if dynamic analysis is needed) to confirm. If a required key is missing, inform the user which key is missing and how to set it (`export ANTHROPIC_API_KEY="..."`) **before** asking whether to proceed or skip.
+
 Two-phase verification:
 
 - **Static analysis**: Claude API scans SKILL.md + scripts/ for dangerous patterns (shell injection, credential theft, network exfiltration, obfuscated code)
@@ -91,6 +93,30 @@ uv run --with streamlit --with pandas --with altair \
 
 When the user asks to "show the dashboard", "view pipeline status", or "open the dashboard", run the command above.
 
+## **IMPORTANT: Skill Placement Rules**
+
+**New skills MUST always be created in `skills/staging/`.** Never place them directly in `developing/` or `generated/`.
+
+- **Manual creation**: Create at `skills/staging/<skill-name>/SKILL.md`
+- **Fetched from Sundial**: `quarantine.py` automatically places in `staging/`
+- **`--generate` flag**: `factory.py` automatically places in `developing/` (exception — goes through pipeline)
+
+`generated/` is exclusively for skills that have passed the full pipeline (safety check + benchmark). Placing unverified skills in `generated/` causes them to be symlinked into `.claude/skills/` and loaded without safety verification.
+
+### Post-Staging Flow
+
+Immediately after placing a skill in `skills/staging/`, **always ask the user whether they want to open the dashboard**:
+
+1. Create the skill file at `skills/staging/<skill-name>/SKILL.md`
+2. Report completion to the user
+3. Ask the user: "Would you like to open the dashboard to view the pipeline status?"
+4. If the user confirms, launch the dashboard:
+   ```bash
+   uv run --with streamlit --with pandas --with altair \
+     streamlit run personalize-skill-factory/scripts/dashboard.py
+   ```
+5. Ask whether to proceed with the next step (safety check, etc.)
+
 ## Directory Structure
 
 ```
@@ -106,14 +132,14 @@ personalize-skill-factory/
 │   ├── publish.py        # Sundial push
 │   └── link_skills.sh    # Symlink generated/ → .claude/skills/
 ├── skills/
-│   ├── staging/          # Unverified (straight from Sundial, not visible to Claude)
+│   ├── staging/          # **New skills go here** — unverified (from Sundial or manual creation)
 │   ├── developing/       # Safety-approved, customizing + benchmarking in progress
 │   │   └── <skill>/
 │   │       ├── SKILL.md
 │   │       └── _benchmarks/   # Auto-saved benchmark results
 │   │           ├── run-001.json
 │   │           └── run-002.json
-│   └── generated/        # Finalized, linked to .claude/skills/, publish-ready
+│   └── generated/        # **Pipeline-verified only** — linked to .claude/skills/, publish-ready
 ├── skillsbench/          # SkillsBench submodule (86 tasks, Harbor CLI)
 └── references/
 ```
@@ -123,13 +149,15 @@ personalize-skill-factory/
 ```
    --generate ──┐
                 ▼
-staging → developing → generated
-  │          │             │
-  │          ├── customize │
-  │          ├── benchmark │
-  │          └── repeat    │
-  │                        │
-  quarantine    dev loop     finalize + publish
+staging ──→ developing → generated
+  │    │       │             │
+  │    │       ├── customize │
+  │    │       ├── benchmark │
+  │    │       └── repeat    │
+  │    │                     │
+  │    └── ask: open dashboard?
+  │                          │
+  quarantine    dev loop       finalize + publish
 ```
 
 ## Environment Variables

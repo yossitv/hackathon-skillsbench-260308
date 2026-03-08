@@ -1,5 +1,5 @@
 # /// script
-# dependencies = ["anthropic", "daytona-sdk"]
+# dependencies = ["anthropic", "daytona-sdk", "python-dotenv"]
 # ///
 """
 Safety Check — Verify skill safety via static analysis (Claude) + dynamic sandbox (Daytona)
@@ -25,7 +25,15 @@ import os
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+# Ensure sibling scripts are importable
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from event_log import emit as log_event
+
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(FACTORY_ROOT.parent / ".env")
 
 
 def read_skill_contents(skill_path: Path) -> dict[str, str]:
@@ -323,6 +331,11 @@ def main():
         sys.exit(1)
 
     report = run_safety_check(skill_path)
+
+    log_event("safety_check", skill_path.name, "staging",
+              recommendation=report["recommendation"],
+              summary=report["summary"],
+              dangerous_patterns=report["dangerous_patterns"])
 
     print(f"\n  {'─' * 50}")
     print(f"  Safety Report: {skill_path.name}")

@@ -22,6 +22,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Ensure sibling scripts are importable
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from event_log import emit as log_event
+
 FACTORY_ROOT = Path(__file__).resolve().parent.parent
 SKILLSBENCH_DIR = FACTORY_ROOT / "skillsbench"
 TASKS_NO_SKILLS = SKILLSBENCH_DIR / "tasks-no-skills"
@@ -362,6 +367,8 @@ def main():
     if args.dev:
         result = dev_benchmark(args.task_id, args.dev, model=args.model)
         print(f"\n  Score: {result.get('score', 'N/A')}")
+        log_event("benchmark", args.dev, "developing",
+                  task_id=args.task_id, score=result.get("score"))
         show_benchmark_history(DEVELOPING_DIR / args.dev)
         return
 
@@ -390,6 +397,10 @@ def main():
     else:
         result = benchmark_task(args.task_id, skill_path=args.skill_path, model=args.model)
         print(f"\n  Score: {result.get('score', 'N/A')}")
+        skill_name = args.skill_path.name if args.skill_path else "baseline"
+        stage = "developing" if args.skill_path and "developing" in str(args.skill_path) else "staging"
+        log_event("benchmark", skill_name, stage,
+                  task_id=args.task_id, score=result.get("score"))
         print(json.dumps(result, indent=2))
 
 

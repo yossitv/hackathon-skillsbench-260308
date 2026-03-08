@@ -22,6 +22,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Ensure sibling scripts are importable
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from event_log import emit as log_event
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 FACTORY_ROOT = REPO_ROOT / "personalize-skill-factory"
 STAGING_DIR = FACTORY_ROOT / "skills" / "staging"
@@ -139,6 +144,8 @@ def main():
     print(f"  Quarantining to staging/...")
     staging_path = quarantine_skill(skill_name)
     print(f"  Done: {staging_path}")
+
+    log_event("fetch", skill_name, "staging", path=str(staging_path))
 
     return staging_path
 
