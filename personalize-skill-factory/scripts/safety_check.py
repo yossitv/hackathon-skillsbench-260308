@@ -103,6 +103,94 @@ Return ONLY valid JSON:
 
 # ── Phase 2: Dynamic Sandbox Execution with Daytona ────────────────────
 
+def _install_iptables(sandbox) -> bool:
+    """Install iptables in sandbox, working around broken repos."""
+    # Check if already available
+    check = sandbox.process.exec("which iptables 2>/dev/null || true")
+    if check.result.strip():
+        return True
+
+    # Remove problematic third-party repos that block apt-get
+    sandbox.process.exec(
+        "sudo rm -f /etc/apt/sources.list.d/yarn.list "
+        "/etc/apt/sources.list.d/nodesource.list 2>/dev/null || true"
+    )
+    # Install iptables
+    result = sandbox.process.exec(
+        "sudo apt-get update -qq 2>/dev/null && "
+        "sudo apt-get install -y -qq iptables 2>/dev/null"
+    )
+    # Verify
+    verify = sandbox.process.exec("which iptables 2>/dev/null || true")
+    return bool(verify.result.strip())
+
+
+def _block_network(sandbox) -> str:
+    """Block outbound network. Returns method used or empty string on failure."""
+    # Try iptables first — must allow ESTABLISHED so sandbox control plane survives
+    if _install_iptables(sandbox):
+        try:
+            # Order matters: allow rules first, then set default DROP
+            # 1. Allow loopback
+            sandbox.process.exec("sudo iptables -A OUTPUT -o lo -j ACCEPT")
+            # 2. Allow already-established connections (control plane)
+            sandbox.process.exec(
+                "sudo iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT"
+            )
+            # 3. Drop all NEW outbound connections
+            sandbox.process.exec(
+                "sudo iptables -A OUTPUT -m state --state NEW -j DROP"
+            )
+            return "iptables"
+        except Exception:
+            pass
+
+    # Fallback: DNS-level blocking (break name resolution for new connections)
+    try:
+        sandbox.process.exec(
+            "sudo cp /etc/resolv.conf /etc/resolv.conf.bak && "
+            "sudo bash -c 'echo nameserver 127.0.0.1 > /etc/resolv.conf'"
+        )
+        return "dns-block"
+    except Exception:
+        pass
+
+    return ""
+
+
+def _detect_network_attempts(sandbox, method: str) -> list[str]:
+    """Detect blocked outbound connections after script execution."""
+    attempts = []
+
+    if method == "iptables":
+        # Check iptables counters for dropped packets
+        stats = sandbox.process.exec("sudo iptables -L OUTPUT -v -n 2>/dev/null || true")
+        if stats.result.strip():
+            for line in stats.result.strip().splitlines():
+                if "DROP" in line and "pkts" not in line:
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0] != "0":
+                        attempts.append(f"Dropped {parts[0]} packets: {line.strip()}")
+
+        # Also check kernel log
+        dmesg = sandbox.process.exec(
+            "dmesg 2>/dev/null | grep -i 'dropped\\|reject\\|blocked' | tail -20 || true"
+        )
+        if dmesg.result.strip():
+            attempts.extend(dmesg.result.strip().splitlines())
+
+    # Universal: try a test connection to verify blocking works
+    test = sandbox.process.exec(
+        "timeout 3 curl -s -o /dev/null -w '%{http_code}' https://httpbin.org/get 2>&1 || echo 'BLOCKED'"
+    )
+    if "BLOCKED" in test.result or test.result.strip() == "000":
+        attempts.append("VERIFIED: outbound HTTPS blocked")
+    elif test.result.strip():
+        attempts.append(f"WARNING: outbound may not be blocked (curl returned: {test.result.strip()[:100]})")
+
+    return attempts
+
+
 def dynamic_analysis(skill_path: Path) -> dict:
     """Run scripts in Daytona sandbox with network blocked."""
     api_key = os.environ.get("DAYTONA_API_KEY")
@@ -123,7 +211,7 @@ def dynamic_analysis(skill_path: Path) -> dict:
     config = DaytonaConfig(api_key=api_key)
     base_url = os.environ.get("DAYTONA_BASE_URL")
     if base_url:
-        config.server_url = base_url
+        config.api_url = base_url
 
     daytona = Daytona(config)
     sandbox = None
@@ -132,10 +220,12 @@ def dynamic_analysis(skill_path: Path) -> dict:
         "files_changed": [],
         "sandbox_stdout": "",
         "sandbox_stderr": "",
+        "network_method": "",
     }
 
     try:
         sandbox = daytona.create()
+        print(f"    Sandbox created: {sandbox.id}")
 
         # Upload skill files
         for f in skill_path.rglob("*"):
@@ -145,51 +235,53 @@ def dynamic_analysis(skill_path: Path) -> dict:
                     f.read_bytes(),
                     f"/home/daytona/skill/{rel}"
                 )
+        print(f"    Skill files uploaded")
 
         # Record initial state
-        sandbox.process.exec("find /home/daytona/skill -type f > /tmp/before.txt")
+        sandbox.process.exec("find /home/daytona/skill -type f | sort > /tmp/before.txt")
 
         # Block outbound network
-        sandbox.process.exec("iptables -P OUTPUT DROP")
-        sandbox.process.exec("iptables -A OUTPUT -o lo -j ACCEPT")
+        method = _block_network(sandbox)
+        report["network_method"] = method
+        print(f"    Network blocked via: {method}")
 
         # Find and execute scripts
         scripts_dir = skill_path / "scripts"
         if scripts_dir.exists():
-            for script in scripts_dir.iterdir():
+            for script in sorted(scripts_dir.iterdir()):
                 if not script.is_file():
                     continue
 
                 remote_path = f"/home/daytona/skill/scripts/{script.name}"
                 if script.suffix == ".py":
-                    cmd = f"python {remote_path} --help 2>&1 || python {remote_path} 2>&1"
+                    cmd = f"timeout 30 python {remote_path} --help 2>&1 || timeout 30 python {remote_path} 2>&1"
                 elif script.suffix == ".sh":
-                    cmd = f"bash {remote_path} --help 2>&1 || bash {remote_path} 2>&1"
+                    cmd = f"timeout 30 bash {remote_path} --help 2>&1 || timeout 30 bash {remote_path} 2>&1"
                 else:
                     continue
 
-                result = sandbox.process.exec(cmd, timeout=30)
+                print(f"    Executing: {script.name}")
+                result = sandbox.process.exec(cmd)
                 report["sandbox_stdout"] += f"\n--- {script.name} ---\n{result.result}\n"
 
-        # Check for network attempts in logs
-        net_check = sandbox.process.exec(
-            "dmesg 2>/dev/null | grep -i 'dropped\\|reject' || true"
-        )
-        if net_check.result.strip():
-            report["network_attempts"] = net_check.result.strip().splitlines()
+        # Detect network attempts
+        report["network_attempts"] = _detect_network_attempts(sandbox, method)
 
         # Check file changes
-        sandbox.process.exec("find /home/daytona/skill -type f > /tmp/after.txt")
+        sandbox.process.exec("find /home/daytona/skill -type f | sort > /tmp/after.txt")
         diff = sandbox.process.exec("diff /tmp/before.txt /tmp/after.txt || true")
         if diff.result.strip():
             report["files_changed"] = diff.result.strip().splitlines()
 
     except Exception as e:
         report["error"] = str(e)
+        import traceback
+        report["traceback"] = traceback.format_exc()
     finally:
         if sandbox:
             try:
                 daytona.delete(sandbox)
+                print(f"    Sandbox deleted")
             except Exception:
                 pass
 

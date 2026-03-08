@@ -1,11 +1,6 @@
 ---
 name: personalize-skill-factory
-description: >
-  Fetch agent skills from Sundial, verify safety in Daytona sandbox, customize
-  with Claude API, benchmark on SkillsBench, and publish improvements. Use when:
-  (1) User wants to find and improve an agent skill, (2) User says "personalize
-  this skill", "benchmark a skill", or "improve skill for <task>", (3) User wants
-  a before/after comparison of skill effectiveness.
+description: "Personalize agent skills pipeline: fetch from Sundial, verify safety in Daytona sandbox, customize with Claude API, benchmark on SkillsBench (before/after comparison), and publish. Use when user wants to find, improve, benchmark, or personalize an agent skill."
 ---
 
 # Personalize Skill Factory
@@ -16,12 +11,23 @@ End-to-end pipeline: fetch → quarantine → safety check → customize → ben
 
 ```bash
 # Full pipeline
+# Default (Claude API)
 uv run personalize-skill-factory/scripts/factory.py <skill-query> <task-id>
+
+# With Hermes Agent (multi-model)
+uv run personalize-skill-factory/scripts/factory.py <skill-query> <task-id> --optimizer hermes
+uv run personalize-skill-factory/scripts/factory.py <skill-query> <task-id> --optimizer hermes:deepseek/deepseek-r1
+
+# With OpenRouter (any model)
+uv run personalize-skill-factory/scripts/factory.py <skill-query> <task-id> --optimizer openrouter:google/gemini-2.5-pro
+
+# Auto mode with comparison
+uv run personalize-skill-factory/scripts/factory.py <skill-query> <task-id> --auto --optimizer hermes
 
 # Individual steps
 uv run personalize-skill-factory/scripts/quarantine.py <skill-query>
 uv run personalize-skill-factory/scripts/safety_check.py skills/staging/<name>
-uv run personalize-skill-factory/scripts/benchmark.py <task-id> --compare skills/generated/<name>
+uv run personalize-skill-factory/scripts/benchmark.py <task-id> --compare-baseline <skill-name>
 uv run personalize-skill-factory/scripts/publish.py skills/generated/<name>
 ```
 
@@ -46,7 +52,16 @@ Returns a report with `recommendation: "safe" | "review" | "dangerous"`.
 
 ### 3. Customize (in `factory.py`)
 
-If the user chooses to customize, send the current SKILL.md + failure context to Claude API for improvement. The improved version replaces the original.
+Multi-model skill optimization via `--optimizer`:
+
+| Optimizer | Command | Description |
+|-----------|---------|-------------|
+| `claude` (default) | `--optimizer claude` | Claude API (Sonnet) |
+| `hermes` | `--optimizer hermes` | Hermes Agent CLI (uses configured model) |
+| `hermes:<model>` | `--optimizer hermes:deepseek/deepseek-r1` | Hermes with specific model |
+| `openrouter:<model>` | `--optimizer openrouter:google/gemini-2.5-pro` | OpenRouter API (any model) |
+
+Sends current SKILL.md + benchmark failures + task instruction to the chosen model for improvement.
 
 ### 4. Benchmark (`benchmark.py`)
 
@@ -102,9 +117,10 @@ staging → developing → generated
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `ANTHROPIC_API_KEY` | Yes | Claude API for analysis + customization |
+| `ANTHROPIC_API_KEY` | Yes | Claude API for safety analysis + customization |
 | `DAYTONA_API_KEY` | No | Daytona sandbox (skipped if missing) |
 | `DAYTONA_BASE_URL` | No | Daytona endpoint (default: https://app.daytona.io/api) |
+| `OPENROUTER_API_KEY` | No | OpenRouter API for multi-model optimization |
 
 ## Available SkillsBench Tasks
 

@@ -226,6 +226,74 @@ def dev_benchmark(task_id: str, skill_name: str, model: str = "anthropic/claude-
     return result
 
 
+def compare_baseline(dev_path: Path, task_id: str, model: str = "anthropic/claude-sonnet-4-20250514"):
+    """Run Sundial original (baseline) vs personalized skill and compare scores."""
+    baseline_dir = dev_path / "_baseline"
+    if not baseline_dir.exists() or not (baseline_dir / "SKILL.md").exists():
+        print("  No baseline found. Run the full pipeline from Sundial first.")
+        return
+
+    print(f"\n  {'═' * 55}")
+    print(f"  Sundial Original vs Personalized — {task_id}")
+    print(f"  {'═' * 55}")
+
+    # Run baseline (Sundial original)
+    print(f"\n  [1/2] Benchmarking: Sundial original...")
+    baseline_result = benchmark_task(task_id, skill_path=baseline_dir, model=model)
+    save_benchmark_result(dev_path, task_id, baseline_result, label="baseline-sundial")
+    baseline_score = baseline_result.get("score")
+    print(f"  Score: {baseline_score}")
+
+    # Run personalized (current developing)
+    print(f"\n  [2/2] Benchmarking: Personalized...")
+    personalized_result = benchmark_task(task_id, skill_path=dev_path, model=model)
+    save_benchmark_result(dev_path, task_id, personalized_result, label="personalized")
+    personalized_score = personalized_result.get("score")
+    print(f"  Score: {personalized_score}")
+
+    # Comparison report
+    b = baseline_score or 0
+    p = personalized_score or 0
+    delta = p - b
+    improved = "✓ IMPROVED" if delta > 0 else ("— NO CHANGE" if delta == 0 else "✗ REGRESSED")
+
+    print(f"\n  {'═' * 55}")
+    print(f"  COMPARISON RESULT")
+    print(f"  {'─' * 55}")
+    print(f"  Task:              {task_id}")
+    print(f"  Sundial original:  {baseline_score}")
+    print(f"  Personalized:      {personalized_score}")
+    print(f"  Delta:             {delta:+.1f}  {improved}")
+    print(f"  {'─' * 55}")
+
+    # Test details if available
+    for label, result in [("Sundial", baseline_result), ("Personalized", personalized_result)]:
+        summary = result.get("tests_summary")
+        if summary:
+            print(f"  {label}: {summary.get('passed', 0)}/{summary.get('total', 0)} tests passed")
+        failed = result.get("tests_failed", [])
+        if failed:
+            print(f"    Failed: {', '.join(failed[:5])}")
+
+    print(f"  {'═' * 55}")
+
+    # Save comparison summary
+    benchmarks_dir = dev_path / "_benchmarks"
+    benchmarks_dir.mkdir(exist_ok=True)
+    comparison = {
+        "task_id": task_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "baseline_score": baseline_score,
+        "personalized_score": personalized_score,
+        "delta": delta,
+        "baseline_tests": baseline_result.get("tests_summary"),
+        "personalized_tests": personalized_result.get("tests_summary"),
+    }
+    comp_path = benchmarks_dir / f"comparison-{task_id}.json"
+    comp_path.write_text(json.dumps(comparison, indent=2))
+    print(f"  Saved: {comp_path}")
+
+
 def show_benchmark_history(skill_path: Path):
     """Print benchmark history for a skill."""
     benchmarks_dir = skill_path / "_benchmarks"
@@ -239,14 +307,26 @@ def show_benchmark_history(skill_path: Path):
         return
 
     print(f"\n  Benchmark History: {skill_path.name}")
-    print(f"  {'─' * 50}")
-    print(f"  {'Run':<6} {'Task':<35} {'Score':<8} {'Label'}")
-    print(f"  {'─' * 50}")
+    print(f"  {'─' * 60}")
+    print(f"  {'Run':<6} {'Task':<30} {'Score':<8} {'Label'}")
+    print(f"  {'─' * 60}")
     for run_file in runs:
         r = json.loads(run_file.read_text())
         score = r.get("score", "N/A")
-        print(f"  {r.get('run', '?'):<6} {r.get('task_id', '?'):<35} {str(score):<8} {r.get('label', '')}")
-    print(f"  {'─' * 50}")
+        label = r.get("label", "")
+        marker = "  ◆" if "baseline" in label else "  ●" if "personalized" in label else "   "
+        print(f"{marker}{r.get('run', '?'):<5} {r.get('task_id', '?'):<30} {str(score):<8} {label}")
+    print(f"  {'─' * 60}")
+
+    # Show comparison summaries if any
+    comp_files = sorted((skill_path / "_benchmarks").glob("comparison-*.json"))
+    if comp_files:
+        print(f"\n  Comparisons (Sundial → Personalized):")
+        for cf in comp_files:
+            c = json.loads(cf.read_text())
+            delta = c.get("delta", 0)
+            arrow = "↑" if delta > 0 else ("→" if delta == 0 else "↓")
+            print(f"    {c.get('task_id', '?')}: {c.get('baseline_score', '?')} → {c.get('personalized_score', '?')} ({delta:+.1f}) {arrow}")
 
 
 def main():
@@ -260,12 +340,23 @@ def main():
                         help="Run before (no skill) + after (with skill) and compare")
     parser.add_argument("--dev", default=None, metavar="SKILL_NAME",
                         help="Run using skill from developing/, save to _benchmarks/")
+    parser.add_argument("--compare-baseline", default=None, metavar="SKILL_NAME",
+                        help="Compare Sundial original vs personalized for a skill in developing/")
     parser.add_argument("--history", type=Path, default=None, metavar="SKILL_PATH",
                         help="Show benchmark history for a skill")
     args = parser.parse_args()
 
     if args.history:
         show_benchmark_history(args.history)
+        return
+
+    if args.compare_baseline:
+        dev_path = DEVELOPING_DIR / args.compare_baseline
+        if not dev_path.exists():
+            print(f"  Error: {dev_path} not found in developing/")
+            sys.exit(1)
+        compare_baseline(dev_path, args.task_id, model=args.model)
+        show_benchmark_history(dev_path)
         return
 
     if args.dev:
